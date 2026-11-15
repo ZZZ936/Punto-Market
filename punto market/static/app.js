@@ -2,7 +2,7 @@ const $ = (s, root=document) => root.querySelector(s);
 const $$ = (s, root=document) => [...root.querySelectorAll(s)];
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money = n => new Intl.NumberFormat('es-SV',{style:'currency',currency:'USD',maximumFractionDigits:2}).format(Number(n)||0);
-let publicData={listings:[],spots:[]}, csrf='', adminData=null, currentTab='overview', selectedCategory='Todos';
+let publicData={listings:[],spots:[]}, csrf='', adminData=null, currentRole=null, currentTab='overview', selectedCategory='Todos';
 async function api(path,options={}){
   const headers={'Content-Type':'application/json',...(options.headers||{})};
   if(options.method && options.method!=='GET' && csrf) headers['X-CSRF-Token']=csrf;
@@ -26,11 +26,12 @@ function renderProducts(){let rows=publicData.listings.filter(p=>selectedCategor
 function renderMap(){const map=$('#event-map');$$('.spot-marker',map).forEach(e=>e.remove());(publicData.spots||[]).forEach(s=>{const b=document.createElement('button');b.className='spot-marker '+s.status;b.style.left=s.x+'%';b.style.top=s.y+'%';b.innerHTML=`<b>${esc(s.code)}</b>${esc(s.name)}`;b.setAttribute('aria-label',`${s.code}: ${s.name}${s.vendor?' — '+s.vendor:''}`);b.addEventListener('click',()=>showSpot(s,b));map.append(b)})}
 function showSpot(s,button){const t=$('#map-tooltip');t.innerHTML=`<strong>${esc(s.name)}</strong>${s.vendor?`Marca: ${esc(s.vendor)}<br>`:''}${esc(s.category||'')}${s.public_note?`<br>${esc(s.public_note)}`:''}${s.status==='available'?'<br>Este espacio está disponible para marcas.':''}`;t.classList.remove('hidden');const r=button.getBoundingClientRect();t.style.left=Math.max(8,Math.min(innerWidth-235,r.left+r.width/2-100))+'px';t.style.top=Math.max(8,r.top-85)+'px';clearTimeout(showSpot.timer);showSpot.timer=setTimeout(()=>t.classList.add('hidden'),5000)}
 $('#apply-form').addEventListener('submit',async ev=>{ev.preventDefault();const f=ev.currentTarget,msg=$('#apply-message'),data=Object.fromEntries(new FormData(f));msg.classList.remove('error');msg.textContent='Enviando…';try{await api('/api/applications',{method:'POST',body:JSON.stringify(data)});f.reset();msg.textContent='¡Solicitud recibida! Nuestro equipo se pondrá en contacto contigo.';toast('Tu solicitud ya está con el equipo.')}catch(e){msg.textContent=e.message;msg.classList.add('error')}});
-$('#login-form').addEventListener('submit',async ev=>{ev.preventDefault();const f=ev.currentTarget,msg=$('#login-message');msg.textContent='Verificando…';msg.classList.remove('error');try{const result=await api('/api/login',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(f)))});csrf=result.csrf;f.reset();$('#login-view').classList.add('hidden');$('#dashboard').classList.remove('hidden');await loadAdmin();}catch(e){msg.textContent=e.message;msg.classList.add('error')}});
-async function refreshSession(){try{const s=await api('/api/session');csrf=s.csrf||'';if(s.authenticated){$('#login-view').classList.add('hidden');$('#dashboard').classList.remove('hidden');await loadAdmin()}else{$('#login-view').classList.remove('hidden');$('#dashboard').classList.add('hidden')}}catch{}}
+$('#login-form').addEventListener('submit',async ev=>{ev.preventDefault();const f=ev.currentTarget,msg=$('#login-message');msg.textContent='Verificando…';msg.classList.remove('error');try{const result=await api('/api/login',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(f)))});csrf=result.csrf;currentRole=result.role;setUserTab();f.reset();$('#login-view').classList.add('hidden');$('#dashboard').classList.remove('hidden');await loadAdmin();}catch(e){msg.textContent=e.message;msg.classList.add('error')}});
+function setUserTab(){const tab=$('#users-tab');if(tab)tab.classList.toggle('hidden',currentRole!=='admin')}
+async function refreshSession(){try{const s=await api('/api/session');csrf=s.csrf||'';currentRole=s.role||null;setUserTab();if(s.authenticated){$('#login-view').classList.add('hidden');$('#dashboard').classList.remove('hidden');await loadAdmin()}else{$('#login-view').classList.remove('hidden');$('#dashboard').classList.add('hidden')}}catch{}}
 async function loadAdmin(){try{adminData=await api('/api/admin');const pending=adminData.applications.filter(a=>a.status==='pending').length;$('#pending-count').textContent=pending;renderDashboard()}catch(e){if(e.message.includes('sesión')){$('#dashboard').classList.add('hidden');$('#login-view').classList.remove('hidden')}else toast(e.message,true)}}
 $$('.dash-tab').forEach(b=>b.addEventListener('click',()=>{currentTab=b.dataset.tab;$$('.dash-tab').forEach(x=>x.classList.toggle('active',x===b));renderDashboard()}));
-$('#logout').addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST',body:'{}'})}catch{}csrf='';adminData=null;$('#dashboard').classList.add('hidden');$('#login-view').classList.remove('hidden');$('#login-message').textContent='Sesión cerrada.';await loadPublic()});
+$('#logout').addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST',body:'{}'})}catch{}csrf='';adminData=null;currentRole=null;currentTab='overview';setUserTab();$('#dashboard').classList.add('hidden');$('#login-view').classList.remove('hidden');$('#login-message').textContent='Sesión cerrada.';await loadPublic()});
 function renderDashboard(){
   if(!adminData)return;
   const d=adminData,c=$('#dash-content');
@@ -52,6 +53,10 @@ function renderDashboard(){
   }else if(currentTab==='spots'){
     c.innerHTML=`<div class="dash-panel"><h3>Agregar puesto al mapa</h3><form class="dash-form" id="spot-form"><label>Código<input name="code" maxlength="16" placeholder="A05" required></label><label>Nombre<input name="name" maxlength="80" required></label><label>Categoría<input name="category" maxlength="80"></label><label>Marca asignada<input name="vendor" maxlength="120"></label><label>Posición horizontal (%)<input name="x" type="number" min="0" max="100" value="50"></label><label>Posición vertical (%)<input name="y" type="number" min="0" max="100" value="50"></label><label class="span-2">Detalle visible en el mapa<input name="public_note" maxlength="300"></label><button class="button button-dark" type="submit">Agregar puesto ↗</button></form><h3>Puestos registrados</h3>${spotRows(d.spots)}</div>`;
     $('#spot-form').addEventListener('submit',saveSpot);
+  }else if(currentTab==='users'){
+    if(currentRole!=='admin'){currentTab='overview';renderDashboard();return}
+    c.innerHTML=`<div class="dash-panel"><h3>Crear acceso para otra persona</h3><p class="section-intro user-intro">Cada persona usará su propio correo y contraseña. Puedes elegir si tendrá acceso de equipo o permisos de administrador.</p><form class="dash-form" id="user-form"><label>Correo electrónico<input name="email" type="email" maxlength="254" autocomplete="off" required></label><label>Tipo de cuenta<select name="role"><option value="manager">Equipo · administra el mercado</option><option value="admin">Administrador · también crea cuentas</option></select></label><label class="span-2">Contraseña inicial<input name="password" type="password" minlength="12" maxlength="300" autocomplete="new-password" required><small class="optional">Mínimo 12 caracteres. Compártela con esa persona de forma privada.</small></label><button class="button button-dark" type="submit">Crear cuenta ↗</button></form><h3>Cuentas con acceso</h3>${userRows(d.users||[])}</div>`;
+    $('#user-form').addEventListener('submit',saveUser);
   }else if(currentTab==='event'){
     c.innerHTML=`<div class="dash-panel"><h3>Información pública del evento</h3><form class="dash-form" id="event-form"><label>Nombre<input name="event_name" value="${esc(d.event.event_name)}" required></label><label>Fecha<input name="event_date" value="${esc(d.event.event_date)}"></label><label>Ubicación<input name="event_location" value="${esc(d.event.event_location)}"></label><label>Horario<input name="event_hours" value="${esc(d.event.event_hours)}"></label><label class="span-2">Frase breve<input name="event_tagline" value="${esc(d.event.event_tagline)}"></label><label class="span-2">Descripción<textarea name="event_description" rows="3">${esc(d.event.event_description)}</textarea></label><button class="button button-dark" type="submit">Guardar información ↗</button></form></div>`;
     $('#event-form').addEventListener('submit',saveEvent);
@@ -67,6 +72,10 @@ function transactionRows(rows){
   if(!rows.length)return'<p class="empty">Todavía no hay movimientos registrados.</p>';
   const labels={sale:'Venta',purchase:'Compra',exchange:'Intercambio'};
   return `<div class="table-scroll"><table class="admin-table"><thead><tr><th>Fecha</th><th>Tipo</th><th>Detalle</th><th>Persona / marca</th><th>Valor</th><th></th></tr></thead><tbody>${rows.map(t=>`<tr><td>${esc(t.date)}</td><td>${labels[t.kind]||esc(t.kind)}</td><td>${esc(t.description)}</td><td>${esc(t.counterparty)}</td><td>${Number(t.amount)>0?money(t.amount):'—'}</td><td><button class="mini-button" data-action="delete-transaction" data-id="${t.id}">Eliminar</button></td></tr>`).join('')}</tbody></table></div>`;
+}
+function userRows(rows){
+  if(!rows.length)return'<p class="empty">Todavía no hay cuentas adicionales.</p>';
+  return `<div class="admin-list">${rows.map(u=>`<div class="admin-row"><div class="row-main"><strong>${esc(u.email)}</strong><small>Creada ${esc((u.created_at||'').slice(0,10))}</small></div><div class="row-actions"><span class="status-chip ${u.role==='admin'?'approved':'pending'}">${u.role==='admin'?'Administrador':'Equipo'}</span></div></div>`).join('')}</div>`;
 }
 function spotRows(rows){return `<div class="admin-list">${rows.map(s=>`<div class="admin-row"><div class="row-main"><strong>${esc(s.code)} · ${esc(s.name)}</strong><small>${esc(s.category)} · ${esc(s.vendor)} · ${s.x}% / ${s.y}%</small></div><div class="row-actions"><span class="status-chip ${s.status}">${statusLabel(s.status)}</span><button class="mini-button" data-action="toggle-spot" data-id="${s.id}" data-status="${s.status==='available'?'occupied':'available'}">${s.status==='available'?'Reservar':'Liberar'}</button><button class="mini-button" data-action="delete-spot" data-id="${s.id}">Eliminar</button></div></div>`).join('')}</div>`}
 $('#dash-content').addEventListener('click',async ev=>{
@@ -125,6 +134,13 @@ async function saveTransaction(ev){
     if(data.kind==='exchange'&&!data.amount)data.amount='0';
     await api('/api/admin/transactions',{method:'POST',body:JSON.stringify(data)});
     await loadAdmin();toast('Movimiento registrado.');
+  }catch(e){toast(e.message,true)}
+}
+async function saveUser(ev){
+  ev.preventDefault();
+  try{
+    await api('/api/admin/users',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(ev.currentTarget)))});
+    await loadAdmin();toast('Cuenta creada. Comparte los datos de acceso de forma privada.');
   }catch(e){toast(e.message,true)}
 }
 async function saveSpot(ev){ev.preventDefault();try{await api('/api/admin/spots',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(ev.currentTarget)))});await loadAdmin();await loadPublic();toast('Puesto agregado al mapa.')}catch(e){toast(e.message,true)}}

@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS admins(id INTEGER PRIMARY KEY, email TEXT NOT NULL UN
 CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE, csrf TEXT NOT NULL, expires_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS listings(id INTEGER PRIMARY KEY, name TEXT NOT NULL, category TEXT NOT NULL DEFAULT 'Otros', price REAL NOT NULL DEFAULT 0, description TEXT NOT NULL DEFAULT '', image TEXT NOT NULL DEFAULT '', seller TEXT NOT NULL DEFAULT '', spot_id INTEGER, status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS applications(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL, brand TEXT NOT NULL, category TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS transactions(id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('sale','purchase')), description TEXT NOT NULL, amount REAL NOT NULL, counterparty TEXT NOT NULL DEFAULT '', date TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS transactions(id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('sale','purchase','exchange')), description TEXT NOT NULL, amount REAL NOT NULL DEFAULT 0, counterparty TEXT NOT NULL DEFAULT '', date TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS spots(id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE, name TEXT NOT NULL, category TEXT NOT NULL DEFAULT '', x REAL NOT NULL, y REAL NOT NULL, status TEXT NOT NULL DEFAULT 'available', vendor TEXT NOT NULL DEFAULT '', public_note TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
@@ -49,9 +49,24 @@ def connect():
     con.execute("PRAGMA foreign_keys=ON")
     con.execute("PRAGMA journal_mode=WAL")
     con.executescript(SCHEMA)
+    migrate_transactions(con)
     seed(con)
     bootstrap_admin(con)
     return con
+
+def migrate_transactions(con):
+    """Allow exchanges in existing databases without losing prior records."""
+    row = con.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='transactions'").fetchone()
+    if row and "'exchange'" not in (row["sql"] or "").lower():
+        con.commit()
+        con.execute("BEGIN IMMEDIATE")
+        latest=con.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='transactions'").fetchone()
+        if latest and "'exchange'" not in (latest["sql"] or "").lower():
+            con.execute("ALTER TABLE transactions RENAME TO transactions_legacy")
+            con.execute("CREATE TABLE transactions(id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('sale','purchase','exchange')), description TEXT NOT NULL, amount REAL NOT NULL DEFAULT 0, counterparty TEXT NOT NULL DEFAULT '', date TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '')")
+            con.execute("INSERT INTO transactions(id,kind,description,amount,counterparty,date,notes) SELECT id,kind,description,amount,counterparty,date,notes FROM transactions_legacy")
+            con.execute("DROP TABLE transactions_legacy")
+        con.commit()
 
 def bootstrap_admin(con):
     """Create the first admin from private deployment variables when configured."""
@@ -117,8 +132,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status); self.send_header("Content-Type", content_type)
         self.send_header("X-Content-Type-Options", "nosniff"); self.send_header("Referrer-Policy", "same-origin")
         self.send_header("X-Frame-Options", "DENY"); self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
-        self.send_header("Cache-Control", "no-store" if content_type.startswith("application/json") else "public, max-age=300")
-        for k,v in (headers or {}).items(): self.send_header(k,v)
+        cache_control = (headers or {}).get("Cache-Control", "no-store" if content_type.startswith("application/json") else "no-cache, must-revalidate")
+        self.send_header("Cache-Control", cache_control)
+        for k,v in (headers or {}).items():
+            if k.lower() != "cache-control": self.send_header(k,v)
         self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
 
     def json(self, status, obj, headers=None): self.send_bytes(status, json.dumps(obj, ensure_ascii=False).encode(), headers=headers)
@@ -173,14 +190,17 @@ class Handler(BaseHTTPRequestHandler):
                 spots=[rowdict(r) for r in con.execute("SELECT id,code,name,category,x,y,status,CASE WHEN status='occupied' THEN vendor ELSE '' END AS vendor,public_note FROM spots ORDER BY code")]
                 return self.json(200,{"event":settings,"listings":listings,"spots":spots})
             if path=="/api/session":
-                s=self.session(); return self.json(200,{"authenticated":bool(s),"email":s["email"] if s else None,"csrf":s["csrf"] if s else None})
+                s=self.session(); return self.json(200,{"authenticated":bool(s),"email":s["email"] if s else None,"role":s["role"] if s else None,"csrf":s["csrf"] if s else None})
             if path=="/api/admin":
-                if not self.require_admin(): return
+                s=self.require_admin()
+                if not s: return
                 data={"listings":[rowdict(r) for r in con.execute("SELECT * FROM listings ORDER BY id DESC")],
                       "applications":[rowdict(r) for r in con.execute("SELECT * FROM applications ORDER BY id DESC")],
                       "transactions":[rowdict(r) for r in con.execute("SELECT * FROM transactions ORDER BY date DESC,id DESC")],
                       "spots":[rowdict(r) for r in con.execute("SELECT * FROM spots ORDER BY code")],
                       "event":{r["key"]:r["value"] for r in con.execute("SELECT key,value FROM settings")}}
+                if s["role"]=="admin":
+                    data["users"]=[rowdict(r) for r in con.execute("SELECT id,email,role,created_at FROM admins ORDER BY id")]
                 return self.json(200,data)
             return self.fail(404,"Ruta no encontrada")
         finally: con.close()
@@ -213,7 +233,7 @@ class Handler(BaseHTTPRequestHandler):
                 token=secrets.token_urlsafe(32); csrf=secrets.token_urlsafe(24)
                 con.execute("INSERT INTO sessions VALUES(?,?,?,?)",(hashlib.sha256(token.encode()).hexdigest(),row["id"],csrf,(datetime.now(timezone.utc)+timedelta(days=SESSION_DAYS)).isoformat(timespec="seconds"))); con.commit()
                 secure="; Secure" if os.environ.get("PUNTO_HTTPS")=="1" else ""
-                return self.json(200,{"ok":True,"email":email,"csrf":csrf},{"Set-Cookie":f"pm_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_DAYS*86400}{secure}"})
+                return self.json(200,{"ok":True,"email":email,"role":row["role"],"csrf":csrf},{"Set-Cookie":f"pm_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_DAYS*86400}{secure}"})
             if path=="/api/logout":
                 s=self.require_admin(csrf=True)
                 if not s: return
@@ -221,6 +241,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(200,{"ok":True},{"Set-Cookie":"pm_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"})
             s=self.require_admin(csrf=True)
             if not s:return
+            if path=="/api/admin/users" and s["role"]!="admin":
+                return self.fail(HTTPStatus.FORBIDDEN,"Solo un administrador puede crear cuentas")
             return self.admin_post(path,data,con)
         except ValueError as e: return self.fail(400,str(e))
         except sqlite3.IntegrityError: return self.fail(400,"El registro no se pudo guardar; revisa los datos únicos")
@@ -237,6 +259,24 @@ class Handler(BaseHTTPRequestHandler):
             parts=path.strip("/").split("/")
             if len(parts)!=4 or parts[:2]!=["api","admin"]: return self.fail(404,"Ruta no encontrada")
             table,ident=parts[2],int(parts[3])
+            if table=="listings":
+                current=con.execute("SELECT * FROM listings WHERE id=?",(ident,)).fetchone()
+                if not current:return self.fail(404,"Producto no encontrado")
+                if set(data)=={"status"}:
+                    if data["status"] not in ("pending","approved","hidden"):return self.fail(400,"Cambio de estado no válido")
+                    con.execute("UPDATE listings SET status=? WHERE id=?",(data["status"],ident))
+                else:
+                    name=clean_text(data,"name",120,str(current["name"]))
+                    category=clean_text(data,"category",80,str(current["category"]))
+                    price=float(data.get("price",current["price"]))
+                    if not name or not 0<=price<=1000000:return self.fail(400,"Nombre y precio válido requeridos")
+                    description=clean_text(data,"description",2000,str(current["description"]))
+                    image=clean_text(data,"image",100,str(current["image"]))
+                    seller=clean_text(data,"seller",120,str(current["seller"]))
+                    spot_value=data.get("spot_id",current["spot_id"])
+                    spot=int(spot_value) if str(spot_value or "").isdigit() else None
+                    con.execute("UPDATE listings SET name=?,category=?,price=?,description=?,image=?,seller=?,spot_id=? WHERE id=?",(name,category,price,description,image,seller,spot,ident))
+                con.commit();return self.json(200,{"ok":True})
             allowed={"applications":{"status":["pending","approved","rejected"]},"listings":{"status":["pending","approved","hidden"]},"spots":{"status":["available","occupied","info"]}}
             if table not in allowed or "status" not in data or data["status"] not in allowed[table]["status"]: return self.fail(400,"Cambio de estado no válido")
             con.execute(f"UPDATE {table} SET status=? WHERE id=?",(data["status"],ident)); con.commit()
@@ -245,6 +285,16 @@ class Handler(BaseHTTPRequestHandler):
         finally: con.close()
 
     def admin_post(self,path,data,con):
+        if path=="/api/admin/users":
+            email=clean_text(data,"email",254).lower()
+            password=clean_text(data,"password",300)
+            role=clean_text(data,"role",20)
+            if not email or "@" not in email:return self.fail(400,"Ingresa un correo válido")
+            if len(password)<12:return self.fail(400,"La contraseña debe tener al menos 12 caracteres")
+            if role not in ("admin","manager"):return self.fail(400,"El tipo de cuenta no es válido")
+            hashed,salt=password_hash(password)
+            cur=con.execute("INSERT INTO admins(email,password_hash,salt,role,created_at) VALUES(?,?,?,?,?)",(email,hashed,salt,role,now()))
+            con.commit();return self.json(201,{"ok":True,"id":cur.lastrowid,"email":email,"role":role})
         if path=="/api/admin/listings":
             name=clean_text(data,"name",120); price=float(data.get("price",0))
             if not name or not 0<=price<=1000000: return self.fail(400,"Nombre y precio válido requeridos")
@@ -252,9 +302,11 @@ class Handler(BaseHTTPRequestHandler):
             cur=con.execute("INSERT INTO listings(name,category,price,description,image,seller,spot_id,status,created_at) VALUES(?,?,?,?,?,?,?,?,?)",(name,clean_text(data,"category",80,"Otros"),price,clean_text(data,"description",2000),image,clean_text(data,"seller",120),spot,data.get("status","approved") if data.get("status") in ("approved","pending","hidden") else "approved",now()));con.commit()
             return self.json(201,{"ok":True,"id":cur.lastrowid})
         if path=="/api/admin/transactions":
-            kind=clean_text(data,"kind",20); amount=float(data.get("amount",0)); date=clean_text(data,"date",30,now()[:10])
-            if kind not in ("sale","purchase") or amount<=0: return self.fail(400,"Tipo o monto inválido")
-            cur=con.execute("INSERT INTO transactions(kind,description,amount,counterparty,date,notes) VALUES(?,?,?,?,?,?)",(kind,clean_text(data,"description",180),amount,clean_text(data,"counterparty",120),date,clean_text(data,"notes",1000)));con.commit()
+            kind=clean_text(data,"kind",20); amount=float(data.get("amount") or 0); date=clean_text(data,"date",30,now()[:10])
+            if kind not in ("sale","purchase","exchange") or amount<0 or (kind in ("sale","purchase") and amount<=0): return self.fail(400,"Tipo o monto inválido")
+            description=clean_text(data,"description",180)
+            if not description:return self.fail(400,"Agrega el detalle del movimiento")
+            cur=con.execute("INSERT INTO transactions(kind,description,amount,counterparty,date,notes) VALUES(?,?,?,?,?,?)",(kind,description,amount,clean_text(data,"counterparty",120),date,clean_text(data,"notes",1000)));con.commit()
             return self.json(201,{"ok":True,"id":cur.lastrowid})
         if path=="/api/admin/spots":
             code=clean_text(data,"code",16).upper(); x=float(data.get("x",50));y=float(data.get("y",50))

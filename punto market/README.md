@@ -1,4 +1,4 @@
-# Punto Market
+Punto Market
 
 Aplicación inicial de catálogo y gestión de evento. Incluye una página pública en español, mapa interactivo de puestos, formulario de postulación y un panel privado con acceso de administrador. El servidor, la base de datos y la interfaz usan Python y bibliotecas estándar: no hay que instalar paquetes.
 
@@ -31,6 +31,10 @@ Abre <http://127.0.0.1:8000>. Para cambiar el puerto, define `PORT`; por ejemplo
 4. Crea administradores en el servidor con `python app.py create-admin correo@dominio.com`. No uses la opción `--password` en producción.
 5. Desactiva el registro público de cuentas. La única vía para crear administradores es el comando local del servidor.
 
+### Railway
+
+Si el repositorio conserva el código dentro de una carpeta (por ejemplo, `punto market`), establece **Root Directory** con esa ruta (`/punto market`). Incluye el `Dockerfile` de esa carpeta para asegurar que el despliegue use Python. Deja que Railway construya la imagen y usa `python app.py` como Start Command solo si no está tomando el `CMD` del Dockerfile. Para datos persistentes, monta un volumen en `/app/data` y configura `PUNTO_DATA_DIR=/app/data`. Define `PUNTO_HOST=0.0.0.0` y `PUNTO_HTTPS=1` en las variables del servicio.
+
 Para un alojamiento sin consola interactiva, puedes definir `PUNTO_ADMIN_EMAIL` y `PUNTO_ADMIN_PASSWORD` en el panel privado de variables de entorno del proveedor. Si todavía no existe ninguna cuenta, la app crea el primer administrador al iniciar. Usa una contraseña de al menos 12 caracteres y nunca guardes estas variables en GitHub. Después de creada la cuenta, la app ignora esas variables mientras exista un administrador.
 
 La cookie de sesión es `HttpOnly` y `SameSite=Strict`; en producción lleva además el atributo `Secure`. Las sesiones caducan después de siete días. Las operaciones de escritura del panel requieren un token CSRF ligado a la sesión.
@@ -40,7 +44,7 @@ La cookie de sesión es `HttpOnly` y `SameSite=Strict`; en producción lleva ade
 - Las rutas públicas entregan solo la información del evento, los puestos y los productos con estado `approved`.
 - Las postulaciones, correo y teléfono de vendedores, importes y notas de compra/venta, registros no aprobados y contenido de administración requieren sesión y rol de admin/manager en el servidor. No se confía en ocultar botones de la interfaz como control de acceso.
 - Las solicitudes de vendedor son privadas y empiezan en estado `pending`. Aprobar la solicitud cambia su estado, pero no publica automáticamente productos; el equipo agrega y aprueba los productos por separado.
-- Compras y ventas son registros internos. La app no procesa pagos, no captura datos de tarjetas ni crea pedidos de clientes.
+- Compras, ventas e intercambios son registros internos. La app no procesa pagos, no captura datos de tarjetas ni crea pedidos de clientes.
 - El mapa público muestra los puestos ocupados, disponibles y de información; solo expone el nombre público de la marca asociada a un puesto ocupado.
 - Las imágenes de catálogo admiten JPEG, PNG y WebP de hasta 5 MB. Se guardan con nombre aleatorio y se sirven desde `/uploads/`.
 
@@ -51,9 +55,10 @@ La primera ejecución crea datos de muestra editables para un evento en San Salv
 ## Funciones del panel
 
 - Resumen de productos, postulaciones y totales registrados.
-- Aprobar o rechazar postulaciones; publicar, ocultar y eliminar productos.
+- Aprobar o rechazar postulaciones; editar, publicar, ocultar y eliminar productos.
 - Agregar productos con foto, marca, precio y puesto.
-- Registrar y borrar compras y ventas con contraparte y notas privadas.
+- Registrar y borrar compras, ventas e intercambios con contraparte y notas privadas. En los intercambios, el valor monetario es opcional.
+- Crear cuentas individuales para otros integrantes desde **Usuarios**. Cada persona inicia sesión por separado y puede permanecer conectada a la vez que las demás. El rol **Equipo** puede administrar el mercado; **Administrador** también puede crear cuentas. Las invitaciones no se envían por correo: comparte la contraseña inicial de forma privada.
 - Agregar, reservar/liberar y borrar puestos con coordenadas en porcentaje (0–100).
 - Editar información pública del evento.
 
